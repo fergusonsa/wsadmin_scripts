@@ -5,18 +5,34 @@ import AdminUtilities
 import env
 
 
-def create_JDBC_provider(nodeName, serverName, JDBCName):
+def set_server_sdk(nodeName, serverName):
+    AdminTask.setServerSDK(['-nodeName', nodeName, '-serverName', serverName, '-sdkName', '1.7_64'])
+
+def create_required_jvm_cust_props(nodeName, serverName):
+    for (name, val) in env.JVM_CUSTOM_PROPERTIES.items():
+        AdminTask.setJVMSystemProperties(["-nodeName", nodeName, "-serverName", serverName, "-propertyName", name, "-propertyValue", val])
+        print "\nSetting JVM System Property '%s' to '%s'." % (name, val)
+        
+
+def create_JDBC_provider(nodeName, serverName, jdbc_provider):
     # check if object already exist
-    jdbc = AdminConfig.getid("/Node:%s/Server:%s/JDBCProvider:%s/") % (nodeName, serverName, JDBCName)
+    jdbc = AdminConfig.getid("/Node:%s/Server:%s/JDBCProvider:%s/" % (nodeName, serverName, jdbc_provider))
     if (len(jdbc) == 0):
-        result = AdminTask.createJDBCProvider(["-scope", "Node=%s,Server=%s" %(nodeName, serverName), "-databaseType", "Oracle", "-providerType", "Oracle JDBC Driver", "-implementationType", "Connection pool data source", "-name", JDBCName , "-description", JDBCName, "-classpath", ["${ORACLE_JDBC_DRIVER_PATH}/ojdbc6.jar"], "-nativePath", "" ])
+        result = AdminTask.createJDBCProvider(["-scope", "Node=%s,Server=%s" %(nodeName, serverName), "-databaseType", "Oracle", "-providerType", "Oracle JDBC Driver", "-implementationType", "Connection pool data source", "-name", jdbc_provider , "-description", jdbc_provider, "-classpath", ["${ORACLE_JDBC_DRIVER_PATH}/ojdbc6.jar"], "-nativePath", "" ])
         return result
     else:
-        print "JDBCProvider %s already exists." % JDBCName
+        print "JDBCProvider %s already exists." % jdbc_provider
         return jdbc
 
-def create_datasources_for_environment(serverName, nodeName, jdbc_provider, env_name):
-
+def create_datasources_for_environment(env_name, serverName=None, nodeName=None, jdbc_provider=None):
+    if nodeName is None:
+        nodeName = AdminControl.getNode()
+    if serverName is None:
+        serverObjName = AdminControl.completeObjectName('node=%s,type=Server,*' % nodeName)
+        serverName = AdminControl.getAttribute(serverObjName, 'name')
+    if jdbc_provider is None:
+        jdbc_provider = "Oracle JDBC Driver"
+        
     if env_name not in env.CONFIG_INFO.keys():
         print "'%s' is not a known environment name. Please use one of %s" % (env_name, env.CONFIG_INFO.keys())
         return
@@ -28,29 +44,47 @@ def create_datasources_for_environment(serverName, nodeName, jdbc_provider, env_
 def create_datasource(serverName, nodeName, jdbc_provider, ds_info):
     if ds_info["jndi"] and ds_info["url"] and ds_info["name"] and ds_info["username"] and ds_info["password"]:
         ds_id = AdminConfig.getid('/Node:%s/Server:%s/JDBCProvider:%s/DataSource:%s/' % (nodeName, serverName, jdbc_provider, ds_info["name"]))
-        if ds_id == '':
-            gen_auth_entry_name = "%s/%s" % (nodeName, ds_info["username"])
-            if AdminTask.getAuthDataEntry(['-alias', gen_auth_entry_name]) == "":
-                entry_id = AdminTask.createAuthDataEntry(['-alias', ds_info["username"], '-user', ds_info["username"], '-password', ds_info["password"]])
-            jdbc_provider_id = create_JDBC_provider(nodeName, serverName, jdbc_provider)
-            ds_attribs = [['name', ds_info["name"]], ['url', ds_info["url"]], ["jndiName", ds_info["jndi"]], ["authDataAlias", gen_auth_entry_name], ["datasourceHelperClassname", "com.ibm.websphere.rsadapter.Oracle11gDataStoreHelper"]]
-            new_ds_id = AdminConfig.create('DataSource', jdbc_provider_id, ds_attribs)
-            
-            # new_ds_id = AdminTask.createDatasource(jdbc_provider_id, ["-name", ds_info["name"], "-jndiName", ds_info["jndi"], "-dataStoreHelperClassName", "com.ibm.websphere.rsadapter.Oracle11gDataStoreHelper", "-containerManagedPersistence", "true", "-componentManagedAuthenticationAlias", entry_id, "-configureResourceProperties", [["URL", "java.lang.String", ds_info["url"]]]])
-            # AdminConfig.create('MappingModule', new_ds_id, [["authDataAlias", entry_id] [mappingConfigAlias ""]]')
-            # AdminConfig.modify('(cells/W0537081Node01Cell/nodes/W0537081Node01/servers/server1|resources.xml#CMPConnectorFactory_1564778397577)', [["name", ds_info["name"] + "_CF"], ["authDataAlias", entry_id], ["xaRecoveryAuthAlias", ""]])
-            # AdminConfig.create('MappingModule', '(cells/W0537081Node01Cell/nodes/W0537081Node01/servers/server1|resources.xml#CMPConnectorFactory_1564778397577)', '[[authDataAlias W0537081Node01/CIPO_ECOMM_PRJT_UAT_RW_USER] [mappingConfigAlias ""]]')
-            print "Created a datasource: jndi: '%s'  url: '%s'  name: '%s'  username: '%s'  password: '%s'" % (ds_info["jndi"], ds_info["url"], ds_info["name"], ds_info["username"], ds_info["password"])
+        if ds_id == "":
+            gen_auth_entry_name = ""
+            try:
+                gen_auth_entry_name = "%s/%s" % (nodeName, ds_info["username"])
+                try: 
+                    entry_id = AdminTask.getAuthDataEntry(['-alias', gen_auth_entry_name])
+                except:
+                    entry_id = AdminTask.createAuthDataEntry(['-alias', ds_info["username"], '-user', ds_info["username"], '-password', ds_info["password"]])
+                    AdminConfig.save()
+                jdbc_provider_id = create_JDBC_provider(nodeName, serverName, jdbc_provider)
+                ds_attribs = [['name', ds_info["name"]], 
+                              ["jndiName", ds_info["jndi"]], 
+                              ["authDataAlias", gen_auth_entry_name], 
+                              ["datasourceHelperClassname", "com.ibm.websphere.rsadapter.Oracle11gDataStoreHelper"],
+                              ["mapping", [['authDataAlias' , gen_auth_entry_name] , ["mappingConfigAlias", "DefaultPrincipalMapping"]]]]
+
+                new_ds_id = AdminConfig.create('DataSource', jdbc_provider_id, ds_attribs)
+                propSet = AdminConfig.create('J2EEResourcePropertySet', new_ds_id, [])
+                property = AdminConfig.create('J2EEResourceProperty', propSet, [["name", "URL"], ["value", ds_info["url"]]])
+
+                print "\nCreated a datasource: jndi: '%s'  url: '%s'  name: '%s'  username: '%s'  password: '%s'" % (ds_info["jndi"], ds_info["url"], ds_info["name"], ds_info["username"], ds_info["password"])
+                AdminConfig.save()
+            except: 
+                typ, val, tb = sys.exc_info()
+                print "\nException %s trying to create DataSource '%s' with message %s\n    alias name: %s\n    jndi: %s\n    url: %s\n    username: %s" % (typ, ds_info["name"], val, gen_auth_entry_name, ds_info["jndi"], ds_info["url"], ds_info["username"])
+
         else:
-            print "There already exists a datasource with the name '%s'" % ds_info["name"]
+            print "\nThere already exists a datasource with the name '%s'" % ds_info["name"]
 
-        # return True            
     else:
-        print "There is not enough information to create a datasource: jndi: '%s'  url: '%s'  name: '%s'  username: '%s'  password: '%s'" % (ds_info["jndi"], ds_info["url"], ds_info["name"], ds_info["username"], ds_info["password"])
-    # return False
+        print "\nThere is not enough information to create a datasource: jndi: '%s'  url: '%s'  name: '%s'  username: '%s'  password: '%s'" % (ds_info["jndi"], ds_info["url"], ds_info["name"], ds_info["username"], ds_info["password"])
 
 
-def switch_environment(serverName, nodeName, jdbc_provider, new_env):
+def switch_environment(new_env, serverName=None, nodeName=None, jdbc_provider=None):
+    if nodeName is None:
+        nodeName = AdminControl.getNode()
+    if serverName is None:
+        serverObjName = AdminControl.completeObjectName('node=%s,type=Server,*' % nodeName)
+        serverName = AdminControl.getAttribute(serverObjName, 'name')
+    if jdbc_provider is None:
+        jdbc_provider = "Oracle JDBC Driver"
 
     old_env_property = AdminTask.showJVMSystemProperties(["-nodeName", nodeName, "-serverName", serverName, "-propertyName", "ENVIRONMENT"])
 
@@ -97,7 +131,8 @@ def test_datasources(env_name):
         ds_id = AdminConfig.getid('/DataSource:%s/' % ds_info["name"])
         if ds_id != "":
             try:
-                AdminControl.testConnection(ds_id)
+                print "\nTesting connection of datasource %s:" % ds_info["name"]
+                print AdminControl.testConnection(ds_id)
             except:
                 typ, val, tb = sys.exc_info()
                 print "Exception %s trying to test connection of DataSource '%s' with message %s" % (typ, ds_info["name"], val)
@@ -105,7 +140,12 @@ def test_datasources(env_name):
             print "Cannot find DataSource with the name '%s' to test!" % ds_info["name"]
 
 
-def display_current_environment(serverName, nodeName):
+def display_current_environment(serverName=None, nodeName=None):
+    if nodeName is None:
+        nodeName = AdminControl.getNode()
+    if serverName is None:
+        serverObjName = AdminControl.completeObjectName('node=%s,type=Server,*' % nodeName)
+        serverName = AdminControl.getAttribute(serverObjName, 'name')
 
     env_property = AdminTask.showJVMSystemProperties(["-nodeName", nodeName, "-serverName", serverName, "-propertyName", "ENVIRONMENT"])
 
@@ -130,13 +170,28 @@ def display_current_environment(serverName, nodeName):
                         print propName + " : " + propValue
 
 
-if __name__ == "__main__": 
-    serverName = "server1"
-    nodeName = "W0537081Node01"
+def test():
+    # import switch_environment
+    # import env
+    nodeName = AdminControl.getNode()
+    serverObjName = AdminControl.completeObjectName('node=%s,type=Server,*' % nodeName)
+    serverName = AdminControl.getAttribute(serverObjName, 'name')
+    ds_info = env.CONFIG_INFO["UAT"]["datasources"][""]
+    
+def create_datasources(env_name):
+    nodeName = AdminControl.getNode()
+    serverObjName = AdminControl.completeObjectName('node=%s,type=Server,*' % nodeName)
+    serverName = AdminControl.getAttribute(serverObjName, 'name')
     jdbc_provider = "Oracle JDBC Driver"
-    env_name = "uat"
-    switch_environment.create_datasources_for_environment(serverName, nodeName, jdbc_provider, env_name)
+
+    create_datasources_for_environment(env_name, serverName, nodeName, jdbc_provider)
     
     display_current_environment(serverName, nodeName)
 
-    # switch_environment(serverName, nodeName, jdbc_provider, new_env)
+if __name__ == "__main__": 
+    env_name = "DEV"
+    create_datasources_for_environment(env_name)
+    # switch_environment(new_env, serverName, nodeName, jdbc_provider)
+    
+    display_current_environment()
+    
